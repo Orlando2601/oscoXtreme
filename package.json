@@ -1,0 +1,16 @@
+{
+  "name": "express-oscoXtreme",
+  "version": "1.0.0",
+  "description": "xtreme osco",
+  "main": "app.js",
+  "repository": "prueba osco",
+  "author": "Render Developers",
+  "license": "MIT",
+  "private": false,
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^5.0.0"
+  }
+}
