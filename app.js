@@ -234,12 +234,42 @@ app.post('/', (req, res) => {
       const flowData = JSON.parse(decryptedData.toString());
       console.log('Decrypted flow data:', flowData);
 
-      // Prepare response
-      const responseData = {
-        status: 'success',
-        message: 'Form received successfully',
-        data: flowData
-      };
+      // Handle different flow actions
+      let responseData;
+      
+      if (flowData.action === 'ping') {
+        // For ping, just respond with version
+        responseData = {
+          version: flowData.version,
+          data: {
+            status: 'active'
+          }
+        };
+        console.log('Responding to ping action');
+      } else if (flowData.action === 'data_exchange') {
+        // For data_exchange, process the form data
+        responseData = {
+          version: flowData.version,
+          screen: 'SUCCESS',
+          data: {
+            extension_message_response: {
+              params: {
+                flow_token: flowData.flow_token || 'FLOW_TOKEN'
+              }
+            }
+          }
+        };
+        console.log('Responding to data_exchange action');
+      } else {
+        // Default response
+        responseData = {
+          version: flowData.version,
+          data: {
+            status: 'success',
+            message: 'Form received successfully'
+          }
+        };
+      }
 
       // Encrypt response with AES (using same key and new IV)
       const responseString = JSON.stringify(responseData);
