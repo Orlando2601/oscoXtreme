@@ -72,7 +72,75 @@ app.post('/', (req, res) => {
   console.log(`\n\nWebhook received ${timestamp}\n`);
   console.log(JSON.stringify(req.body, null, 2));
 
-  // Handle WhatsApp Flow requests
+  // Handle WhatsApp Flow requests with encrypted data
+  if (req.body.encrypted_flow_data && req.body.encrypted_aes_key && req.body.initial_vector) {
+    try {
+      // Decrypt AES key with private key
+      const encryptedAesKey = Buffer.from(req.body.encrypted_aes_key, 'base64');
+      const aesKey = crypto.privateDecrypt(
+        {
+          key: privateKey,
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: 'sha256'
+        },
+        encryptedAesKey
+      );
+
+      // Decrypt flow data with AES key
+      const encryptedFlowData = Buffer.from(req.body.encrypted_flow_data, 'base64');
+      const initialVector = Buffer.from(req.body.initial_vector, 'base64');
+      
+      const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, initialVector);
+      let decryptedData = decipher.update(encryptedFlowData);
+      decryptedData = Buffer.concat([decryptedData, decipher.final()]);
+      
+      const flowData = JSON.parse(decryptedData.toString());
+      console.log('Decrypted flow data:', flowData);
+
+      // Prepare response
+      const responseData = {
+        status: 'success',
+        message: 'Form received successfully',
+        data: flowData
+      };
+
+      // Encrypt response with AES (using same key and new IV)
+      const responseString = JSON.stringify(responseData);
+      const responseIv = crypto.randomBytes(16);
+      
+      const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, responseIv);
+      let encryptedResponse = cipher.update(responseString);
+      encryptedResponse = Buffer.concat([encryptedResponse, cipher.final()]);
+      
+      // Encrypt AES key with public key
+      const encryptedResponseKey = crypto.publicEncrypt(
+        {
+          key: fs.readFileSync('/etc/secrets/public_key.pem', 'utf8'),
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: 'sha256'
+        },
+        aesKey
+      );
+
+      // Send response in expected format
+      const finalResponse = {
+        encrypted_flow_data: encryptedResponse.toString('base64'),
+        encrypted_aes_key: encryptedResponseKey.toString('base64'),
+        initial_vector: responseIv.toString('base64')
+      };
+
+      console.log('Sending encrypted response');
+      res.status(200).json(finalResponse);
+      return;
+
+    } catch (error) {
+      console.error('Error processing flow data:', error);
+      res.status(500).end();
+      return;
+    }
+  }
+
+  // Handle WhatsApp Flow requests (old format - keep for compatibility)
   if (req.body.object === 'whatsapp_business_account' && req.body.entry) {
     for (const entry of req.body.entry) {
       if (entry.changes) {
