@@ -155,49 +155,78 @@ app.post('/', (req, res) => {
       console.log('Initial vector length:', initialVector.length);
       console.log('Encrypted flow data (hex):', encryptedFlowData.toString('hex'));
       
-      // Check if data length is valid for AES
-      if (encryptedFlowData.length % 16 !== 0) {
-        console.warn('WARNING: Encrypted data length is not a multiple of 16!');
-        console.warn('This might indicate the data is not properly encrypted or has additional encoding');
-      }
+      // Check if data length suggests GCM mode (has auth tag)
+      const hasAuthTag = encryptedFlowData.length % 16 !== 0 && encryptedFlowData.length > 16;
       
       // Use the correct algorithm and key length
       let decryptedData;
-      try {
-        const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
-        let partialData = decipher.update(encryptedFlowData);
-        decryptedData = Buffer.concat([partialData, decipher.final()]);
-        console.log('Decryption successful with standard padding');
-      } catch (blockError) {
-        console.log('Standard decipher failed:', blockError.message);
-        console.log('Trying with auto padding disabled...');
+      let usedGcm = false;
+      
+      // Try AES-GCM first (WhatsApp might be using GCM instead of CBC)
+      if (hasAuthTag) {
+        console.log('Trying AES-GCM mode (data length suggests auth tag present)...');
+        try {
+          // Last 16 bytes are the auth tag in GCM
+          const authTagLength = 16;
+          const ciphertext = encryptedFlowData.slice(0, -authTagLength);
+          const authTag = encryptedFlowData.slice(-authTagLength);
+          
+          console.log('Ciphertext length:', ciphertext.length);
+          console.log('Auth tag length:', authTag.length);
+          
+          const gcmAlgorithm = aesAlgorithm.replace('-cbc', '-gcm');
+          const decipher = crypto.createDecipheriv(gcmAlgorithm, aesKey, initialVector);
+          decipher.setAuthTag(authTag);
+          
+          let partialData = decipher.update(ciphertext);
+          decryptedData = Buffer.concat([partialData, decipher.final()]);
+          usedGcm = true;
+          aesAlgorithm = gcmAlgorithm; // Update for response encryption
+          console.log('Decryption successful with AES-GCM');
+        } catch (gcmError) {
+          console.log('AES-GCM failed:', gcmError.message);
+          console.log('Falling back to CBC mode...');
+        }
+      }
+      
+      // If GCM didn't work or wasn't attempted, try CBC
+      if (!decryptedData) {
         try {
           const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
-          decipher.setAutoPadding(false);
           let partialData = decipher.update(encryptedFlowData);
           decryptedData = Buffer.concat([partialData, decipher.final()]);
-          
-          console.log('Decrypted data (raw):', decryptedData.toString('hex'));
-          
-          // Remove PKCS7 padding manually
-          const paddingLength = decryptedData[decryptedData.length - 1];
-          console.log('Padding length:', paddingLength);
-          if (paddingLength > 0 && paddingLength <= 16) {
-            decryptedData = decryptedData.slice(0, -paddingLength);
-          }
-          console.log('Decryption successful with manual padding removal');
-        } catch (noPadError) {
-          console.log('Auto padding disabled also failed:', noPadError.message);
-          
-          // Last resort: try to decrypt without final()
+          console.log('Decryption successful with standard CBC padding');
+        } catch (blockError) {
+          console.log('Standard CBC decipher failed:', blockError.message);
+          console.log('Trying with auto padding disabled...');
           try {
             const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
             decipher.setAutoPadding(false);
-            decryptedData = decipher.update(encryptedFlowData);
-            console.log('Decryption successful with update only (no final)');
-          } catch (updateOnlyError) {
-            console.log('All decryption methods failed');
-            throw blockError; // Re-throw the original error
+            let partialData = decipher.update(encryptedFlowData);
+            decryptedData = Buffer.concat([partialData, decipher.final()]);
+            
+            console.log('Decrypted data (raw):', decryptedData.toString('hex'));
+            
+            // Remove PKCS7 padding manually
+            const paddingLength = decryptedData[decryptedData.length - 1];
+            console.log('Padding length:', paddingLength);
+            if (paddingLength > 0 && paddingLength <= 16) {
+              decryptedData = decryptedData.slice(0, -paddingLength);
+            }
+            console.log('Decryption successful with manual padding removal');
+          } catch (noPadError) {
+            console.log('Auto padding disabled also failed:', noPadError.message);
+            
+            // Last resort: try to decrypt without final()
+            try {
+              const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
+              decipher.setAutoPadding(false);
+              decryptedData = decipher.update(encryptedFlowData);
+              console.log('Decryption successful with update only (no final)');
+            } catch (updateOnlyError) {
+              console.log('All decryption methods failed');
+              throw blockError; // Re-throw the original error
+            }
           }
         }
       }
@@ -214,11 +243,23 @@ app.post('/', (req, res) => {
 
       // Encrypt response with AES (using same key and new IV)
       const responseString = JSON.stringify(responseData);
-      const responseIv = crypto.randomBytes(16);
+      const responseIv = crypto.randomBytes(12); // GCM typically uses 12-byte IV
       
-      const cipher = crypto.createCipheriv(aesAlgorithm, aesKey, responseIv);
-      let encryptedResponse = cipher.update(responseString);
-      encryptedResponse = Buffer.concat([encryptedResponse, cipher.final()]);
+      let encryptedResponse;
+      if (usedGcm) {
+        console.log('Encrypting response with AES-GCM');
+        const cipher = crypto.createCipheriv(aesAlgorithm, aesKey, responseIv);
+        let encrypted = cipher.update(responseString);
+        encrypted = Buffer.concat([encrypted, cipher.final()]);
+        const authTag = cipher.getAuthTag();
+        // Combine encrypted data and auth tag
+        encryptedResponse = Buffer.concat([encrypted, authTag]);
+      } else {
+        console.log('Encrypting response with AES-CBC');
+        const cipher = crypto.createCipheriv(aesAlgorithm, aesKey, responseIv);
+        let encrypted = cipher.update(responseString);
+        encryptedResponse = Buffer.concat([encrypted, cipher.final()]);
+      }
       
       // Encrypt AES key with public key
       const encryptedResponseKey = crypto.publicEncrypt(
