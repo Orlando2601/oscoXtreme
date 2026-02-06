@@ -14,7 +14,7 @@ const port = process.env.PORT || 3000;
 const verifyToken = process.env.VERIFY_TOKEN;
 
 // Load private key for decryption
-const privateKey = fs.readFileSync('private_key.pem', 'utf8');
+const privateKey = fs.readFileSync('/etc/secrets/private_key.pem', 'utf8');
 
 // Function to decrypt base64 payload
 function decryptPayload(base64Payload) {
@@ -41,7 +41,7 @@ function encryptResponse(responseData) {
     const responseString = JSON.stringify(responseData);
     const encrypted = crypto.publicEncrypt(
       {
-        key: fs.readFileSync('public_key.pem', 'utf8'),
+        key: fs.readFileSync('/etc/secrets/public_key.pem', 'utf8'),
         padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
         oaepHash: 'sha256'
       },
