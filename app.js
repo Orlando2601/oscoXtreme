@@ -155,9 +155,29 @@ app.post('/', (req, res) => {
       console.log('Initial vector length:', initialVector.length);
       
       // Use the correct algorithm and key length
-      const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
-      let decryptedData = decipher.update(encryptedFlowData);
-      decryptedData = Buffer.concat([decryptedData, decipher.final()]);
+      let decryptedData;
+      try {
+        const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
+        let partialData = decipher.update(encryptedFlowData);
+        decryptedData = Buffer.concat([partialData, decipher.final()]);
+      } catch (blockError) {
+        console.log('Standard decipher failed, trying with auto padding disabled...');
+        try {
+          const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
+          decipher.setAutoPadding(false);
+          let partialData = decipher.update(encryptedFlowData);
+          decryptedData = Buffer.concat([partialData, decipher.final()]);
+          
+          // Remove padding manually if needed
+          const paddingLength = decryptedData[decryptedData.length - 1];
+          if (paddingLength <= 16) {
+            decryptedData = decryptedData.slice(0, -paddingLength);
+          }
+        } catch (noPadError) {
+          console.log('Auto padding disabled failed, trying different approach...');
+          throw blockError; // Re-throw the original error
+        }
+      }
       
       const flowData = JSON.parse(decryptedData.toString());
       console.log('Decrypted flow data:', flowData);
