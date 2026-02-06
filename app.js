@@ -153,6 +153,13 @@ app.post('/', (req, res) => {
       
       console.log('Encrypted flow data length:', encryptedFlowData.length);
       console.log('Initial vector length:', initialVector.length);
+      console.log('Encrypted flow data (hex):', encryptedFlowData.toString('hex'));
+      
+      // Check if data length is valid for AES
+      if (encryptedFlowData.length % 16 !== 0) {
+        console.warn('WARNING: Encrypted data length is not a multiple of 16!');
+        console.warn('This might indicate the data is not properly encrypted or has additional encoding');
+      }
       
       // Use the correct algorithm and key length
       let decryptedData;
@@ -160,22 +167,38 @@ app.post('/', (req, res) => {
         const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
         let partialData = decipher.update(encryptedFlowData);
         decryptedData = Buffer.concat([partialData, decipher.final()]);
+        console.log('Decryption successful with standard padding');
       } catch (blockError) {
-        console.log('Standard decipher failed, trying with auto padding disabled...');
+        console.log('Standard decipher failed:', blockError.message);
+        console.log('Trying with auto padding disabled...');
         try {
           const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
           decipher.setAutoPadding(false);
           let partialData = decipher.update(encryptedFlowData);
           decryptedData = Buffer.concat([partialData, decipher.final()]);
           
-          // Remove padding manually if needed
+          console.log('Decrypted data (raw):', decryptedData.toString('hex'));
+          
+          // Remove PKCS7 padding manually
           const paddingLength = decryptedData[decryptedData.length - 1];
-          if (paddingLength <= 16) {
+          console.log('Padding length:', paddingLength);
+          if (paddingLength > 0 && paddingLength <= 16) {
             decryptedData = decryptedData.slice(0, -paddingLength);
           }
+          console.log('Decryption successful with manual padding removal');
         } catch (noPadError) {
-          console.log('Auto padding disabled failed, trying different approach...');
-          throw blockError; // Re-throw the original error
+          console.log('Auto padding disabled also failed:', noPadError.message);
+          
+          // Last resort: try to decrypt without final()
+          try {
+            const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
+            decipher.setAutoPadding(false);
+            decryptedData = decipher.update(encryptedFlowData);
+            console.log('Decryption successful with update only (no final)');
+          } catch (updateOnlyError) {
+            console.log('All decryption methods failed');
+            throw blockError; // Re-throw the original error
+          }
         }
       }
       
