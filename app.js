@@ -279,7 +279,10 @@ app.post('/', (req, res) => {
       };
 
       console.log('Sending encrypted response');
-      res.status(200).json(finalResponse);
+      console.log('Response format:', finalResponse);
+      
+      // WhatsApp expects the response as a base64 string, not JSON
+      res.status(200).send(encryptedResponse.toString('base64'));
       return;
 
     } catch (error) {
