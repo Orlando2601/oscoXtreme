@@ -1,5 +1,7 @@
 // Import Express.js
 const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs');
 
 // Create an Express app
 const app = express();
@@ -10,6 +12,47 @@ app.use(express.json());
 // Set port and verify_token
 const port = process.env.PORT || 3000;
 const verifyToken = process.env.VERIFY_TOKEN;
+
+// Load private key for decryption
+const privateKey = fs.readFileSync('private_key.pem', 'utf8');
+
+// Function to decrypt base64 payload
+function decryptPayload(base64Payload) {
+  try {
+    const encryptedBuffer = Buffer.from(base64Payload, 'base64');
+    const decrypted = crypto.privateDecrypt(
+      {
+        key: privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256'
+      },
+      encryptedBuffer
+    );
+    return JSON.parse(decrypted.toString());
+  } catch (error) {
+    console.error('Error decrypting payload:', error);
+    return null;
+  }
+}
+
+// Function to encrypt response payload
+function encryptResponse(responseData) {
+  try {
+    const responseString = JSON.stringify(responseData);
+    const encrypted = crypto.publicEncrypt(
+      {
+        key: fs.readFileSync('public_key.pem', 'utf8'),
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256'
+      },
+      Buffer.from(responseString)
+    );
+    return encrypted.toString('base64');
+  } catch (error) {
+    console.error('Error encrypting response:', error);
+    return null;
+  }
+}
 
 // Route for GET requests
 app.get('/', (req, res) => {
@@ -28,6 +71,43 @@ app.post('/', (req, res) => {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
   console.log(`\n\nWebhook received ${timestamp}\n`);
   console.log(JSON.stringify(req.body, null, 2));
+
+  // Handle WhatsApp Flow requests
+  if (req.body.object === 'whatsapp_business_account' && req.body.entry) {
+    for (const entry of req.body.entry) {
+      if (entry.changes) {
+        for (const change of entry.changes) {
+          if (change.field === 'flows' && change.value && change.value.payload) {
+            // Decrypt the incoming payload
+            const decryptedData = decryptPayload(change.value.payload);
+            console.log('Decrypted data:', decryptedData);
+
+            // Process the form data (example: save to database, validate, etc.)
+            
+            // Prepare response
+            const responseData = {
+              status: 'success',
+              message: 'Form received successfully',
+              data: decryptedData
+            };
+
+            // Encrypt the response
+            const encryptedResponse = encryptResponse(responseData);
+            
+            if (encryptedResponse) {
+              // Send encrypted base64 response
+              res.status(200).send(encryptedResponse);
+            } else {
+              res.status(500).end();
+            }
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  // Default response for regular webhook events
   res.status(200).end();
 });
 
