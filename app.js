@@ -271,48 +271,34 @@ app.post('/', (req, res) => {
         };
       }
 
-      // Encrypt response with AES (using same key and new IV)
+      // Encrypt response with AES-GCM using flipped IV
       const responseString = JSON.stringify(responseData);
-      const responseIv = crypto.randomBytes(12); // GCM typically uses 12-byte IV
       
-      let encryptedResponse;
-      if (usedGcm) {
-        console.log('Encrypting response with AES-GCM');
-        const cipher = crypto.createCipheriv(aesAlgorithm, aesKey, responseIv);
-        let encrypted = cipher.update(responseString);
-        encrypted = Buffer.concat([encrypted, cipher.final()]);
-        const authTag = cipher.getAuthTag();
-        // Combine encrypted data and auth tag
-        encryptedResponse = Buffer.concat([encrypted, authTag]);
-      } else {
-        console.log('Encrypting response with AES-CBC');
-        const cipher = crypto.createCipheriv(aesAlgorithm, aesKey, responseIv);
-        let encrypted = cipher.update(responseString);
-        encryptedResponse = Buffer.concat([encrypted, cipher.final()]);
+      // Flip the IV bytes (WhatsApp Flows requirement)
+      const flippedIv = Buffer.alloc(initialVector.length);
+      for (let i = 0; i < initialVector.length; i++) {
+        flippedIv[i] = ~initialVector[i] & 0xff;
       }
+      console.log('Original IV (hex):', initialVector.toString('hex'));
+      console.log('Flipped IV (hex):', flippedIv.toString('hex'));
       
-      // Encrypt AES key with public key
-      const encryptedResponseKey = crypto.publicEncrypt(
-        {
-          key: publicKey,
-          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256'
-        },
-        aesKey
-      );
-
-      // Send response in expected format
-      const finalResponse = {
-        encrypted_flow_data: encryptedResponse.toString('base64'),
-        encrypted_aes_key: encryptedResponseKey.toString('base64'),
-        initial_vector: responseIv.toString('base64')
-      };
-
+      // Encrypt with AES-128-GCM
+      const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, flippedIv);
+      const encryptedResponse = Buffer.concat([
+        cipher.update(responseString, 'utf-8'),
+        cipher.final()
+      ]);
+      const authTag = cipher.getAuthTag();
+      
+      // Response = base64(flipped_iv + ciphertext + auth_tag)
+      const responseBuffer = Buffer.concat([flippedIv, encryptedResponse, authTag]);
+      const base64Response = responseBuffer.toString('base64');
+      
       console.log('Sending encrypted response');
-      console.log('Response format:', finalResponse);
+      console.log('Response string:', responseString);
+      console.log('Response base64:', base64Response);
       
-      // WhatsApp expects the response as a base64 string, not JSON
-      res.status(200).send(encryptedResponse.toString('base64'));
+      res.status(200).send(base64Response);
       return;
 
     } catch (error) {
