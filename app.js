@@ -15,6 +15,11 @@ const verifyToken = process.env.VERIFY_TOKEN;
 
 // Load private key for decryption
 const privateKey = fs.readFileSync('/etc/secrets/private_key.pem', 'utf8');
+console.log('Private key loaded successfully');
+
+// Load public key for encryption
+const publicKey = fs.readFileSync('/etc/secrets/public_key.pem', 'utf8');
+console.log('Public key loaded successfully');
 
 // Function to decrypt base64 payload
 function decryptPayload(base64Payload) {
@@ -75,22 +80,82 @@ app.post('/', (req, res) => {
   // Handle WhatsApp Flow requests with encrypted data
   if (req.body.encrypted_flow_data && req.body.encrypted_aes_key && req.body.initial_vector) {
     try {
+      console.log('Processing WhatsApp Flow request...');
+      
       // Decrypt AES key with private key
       const encryptedAesKey = Buffer.from(req.body.encrypted_aes_key, 'base64');
-      const aesKey = crypto.privateDecrypt(
-        {
-          key: privateKey,
-          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256'
-        },
-        encryptedAesKey
-      );
+      console.log('Encrypted AES key length:', encryptedAesKey.length);
+      
+      let aesKey;
+      try {
+        // Try OAEP padding first
+        aesKey = crypto.privateDecrypt(
+          {
+            key: privateKey,
+            padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+            oaepHash: 'sha256'
+          },
+          encryptedAesKey
+        );
+      } catch (oaepError) {
+        console.log('OAEP failed, trying PKCS1 padding...');
+        try {
+          // Try PKCS1 padding
+          aesKey = crypto.privateDecrypt(
+            {
+              key: privateKey,
+              padding: crypto.constants.RSA_PKCS1_PADDING
+            },
+            encryptedAesKey
+          );
+        } catch (pkcs1Error) {
+          console.log('PKCS1 failed, trying no padding...');
+          // Try no padding
+          aesKey = crypto.privateDecrypt(
+            {
+              key: privateKey,
+              padding: crypto.constants.RSA_NO_PADDING
+            },
+            encryptedAesKey
+          );
+        }
+      }
+      
+      console.log('Decrypted AES key length:', aesKey.length);
+      console.log('Decrypted AES key (hex):', aesKey.toString('hex'));
+
+      // Determine AES algorithm based on key length
+      let aesAlgorithm;
+      if (aesKey.length === 32) {
+        aesAlgorithm = 'aes-256-cbc';
+      } else if (aesKey.length === 24) {
+        aesAlgorithm = 'aes-192-cbc';
+      } else if (aesKey.length === 16) {
+        aesAlgorithm = 'aes-128-cbc';
+      } else {
+        // Pad or truncate to 32 bytes for AES-256
+        if (aesKey.length > 32) {
+          aesKey = aesKey.slice(0, 32);
+        } else {
+          const paddedKey = Buffer.alloc(32);
+          aesKey.copy(paddedKey);
+          aesKey = paddedKey;
+        }
+        aesAlgorithm = 'aes-256-cbc';
+      }
+      
+      console.log('Using AES algorithm:', aesAlgorithm);
+      console.log('Final AES key length:', aesKey.length);
 
       // Decrypt flow data with AES key
       const encryptedFlowData = Buffer.from(req.body.encrypted_flow_data, 'base64');
       const initialVector = Buffer.from(req.body.initial_vector, 'base64');
       
-      const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, initialVector);
+      console.log('Encrypted flow data length:', encryptedFlowData.length);
+      console.log('Initial vector length:', initialVector.length);
+      
+      // Use the correct algorithm and key length
+      const decipher = crypto.createDecipheriv(aesAlgorithm, aesKey, initialVector);
       let decryptedData = decipher.update(encryptedFlowData);
       decryptedData = Buffer.concat([decryptedData, decipher.final()]);
       
@@ -108,14 +173,14 @@ app.post('/', (req, res) => {
       const responseString = JSON.stringify(responseData);
       const responseIv = crypto.randomBytes(16);
       
-      const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, responseIv);
+      const cipher = crypto.createCipheriv(aesAlgorithm, aesKey, responseIv);
       let encryptedResponse = cipher.update(responseString);
       encryptedResponse = Buffer.concat([encryptedResponse, cipher.final()]);
       
       // Encrypt AES key with public key
       const encryptedResponseKey = crypto.publicEncrypt(
         {
-          key: fs.readFileSync('/etc/secrets/public_key.pem', 'utf8'),
+          key: publicKey,
           padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
           oaepHash: 'sha256'
         },
@@ -135,7 +200,8 @@ app.post('/', (req, res) => {
 
     } catch (error) {
       console.error('Error processing flow data:', error);
-      res.status(500).end();
+      console.error('Error stack:', error.stack);
+      res.status(500).json({ error: 'Internal server error', details: error.message });
       return;
     }
   }
