@@ -117,18 +117,70 @@ app.post('/', (req, res) => {
         };
         console.log('Responding to ping action');
       } else if (decryptedBody.action === 'data_exchange') {
-        responseData = {
-          version: decryptedBody.version,
-          screen: 'SUCCESS',
-          data: {
-            extension_message_response: {
-              params: {
-                flow_token: decryptedBody.flow_token || 'FLOW_TOKEN'
+        const screen = decryptedBody.screen;
+        const data = decryptedBody.data;
+        
+        console.log('Data exchange received from screen:', screen);
+        console.log('Data payload:', JSON.stringify(data, null, 2));
+        
+        // Handle navigation from WELCOME screen
+        if (screen === 'WELCOME') {
+          const accion = data?.accion;
+          console.log('Navigation request for action:', accion);
+          
+          if (accion === 'cargar_factura') {
+            responseData = {
+              version: decryptedBody.version,
+              screen: 'CARGAR_FACTURA',
+              data: {}
+            };
+            console.log('Navigating to CARGAR_FACTURA screen');
+          } else if (accion === 'crear_cliente') {
+            responseData = {
+              version: decryptedBody.version,
+              screen: 'CREAR_CLIENTE',
+              data: {}
+            };
+            console.log('Navigating to CREAR_CLIENTE screen');
+          } else {
+            // Default to SUCCESS for unknown actions
+            responseData = {
+              version: decryptedBody.version,
+              screen: 'SUCCESS',
+              data: {
+                extension_message_response: {
+                  params: {
+                    flow_token: decryptedBody.flow_token || 'FLOW_TOKEN'
+                  }
+                }
+              }
+            };
+          }
+        } else {
+          // Terminal screens - close the flow and show the data
+          console.log('Terminal screen completion');
+          
+          // Extract image data if present
+          if (data?.images && Array.isArray(data.images)) {
+            console.log('Images received:', data.images.length);
+            data.images.forEach((image, index) => {
+              console.log(`Image ${index}:`, JSON.stringify(image, null, 2));
+            });
+          }
+          
+          responseData = {
+            version: decryptedBody.version,
+            screen: 'SUCCESS',
+            data: {
+              extension_message_response: {
+                params: {
+                  flow_token: decryptedBody.flow_token || 'FLOW_TOKEN'
+                }
               }
             }
-          }
-        };
-        console.log('Responding to data_exchange action');
+          };
+          console.log('Flow completed successfully');
+        }
       } else {
         responseData = {
           version: decryptedBody.version,
