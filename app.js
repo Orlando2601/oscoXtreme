@@ -100,6 +100,8 @@ async function downloadMediaFromCDN(cdnUrl) {
 async function decryptAndValidateMedia(mediaItem) {
   const { media_id, cdn_url, file_name, encryption_metadata } = mediaItem;
   const { encrypted_hash, iv, encryption_key, hmac_key, plaintext_hash } = encryption_metadata;
+  // "hmac" field: full HMAC hash provided in metadata (actual payload format)
+  const expectedHmac = encryption_metadata.hmac;
 
   console.log(`Processing media: ${file_name} (${media_id})`);
 
@@ -121,14 +123,23 @@ async function decryptAndValidateMedia(mediaItem) {
   // Step 4: Validate HMAC-SHA256
   const ivBuffer = Buffer.from(iv, 'base64');
   const hmacKeyBuffer = Buffer.from(hmac_key, 'base64');
-  const hmac = crypto.createHmac('sha256', hmacKeyBuffer);
-  hmac.update(ivBuffer);
-  hmac.update(ciphertext);
-  const computedHmac = hmac.digest();
-  const computedHmac10 = computedHmac.subarray(0, 10);
+  const hmacCalc = crypto.createHmac('sha256', hmacKeyBuffer);
+  hmacCalc.update(ivBuffer);
+  hmacCalc.update(ciphertext);
+  const computedHmac = hmacCalc.digest();
 
-  if (!crypto.timingSafeEqual(hmac10, computedHmac10)) {
-    throw new Error(`HMAC validation failed for ${file_name}`);
+  if (expectedHmac) {
+    // Validate against full HMAC provided in metadata
+    const expectedHmacBuffer = Buffer.from(expectedHmac, 'base64');
+    if (!crypto.timingSafeEqual(computedHmac, expectedHmacBuffer)) {
+      throw new Error(`HMAC validation failed for ${file_name}`);
+    }
+  } else {
+    // Fallback: validate first 10 bytes appended to cdn_file
+    const computedHmac10 = computedHmac.subarray(0, 10);
+    if (!crypto.timingSafeEqual(hmac10, computedHmac10)) {
+      throw new Error(`HMAC validation failed for ${file_name}`);
+    }
   }
   console.log(`HMAC validated for ${file_name}`);
 
@@ -157,9 +168,9 @@ async function decryptAndValidateMedia(mediaItem) {
   return { media_id, file_name, outputPath, size: decryptedMedia.length };
 }
 
-// Process all media items from photo_picker or document_picker
+// Process all media items from photo_picker, document_picker, or images
 async function processFlowMedia(data) {
-  const mediaItems = data.photo_picker || data.document_picker || [];
+  const mediaItems = data.photo_picker || data.document_picker || data.images || [];
   if (mediaItems.length === 0) return [];
 
   console.log(`Processing ${mediaItems.length} media item(s)`);
@@ -264,8 +275,8 @@ app.post('/', async (req, res) => {
             });
           }
 
-          // Process media from photo_picker or document_picker
-          if (data?.photo_picker || data?.document_picker) {
+          // Process media from photo_picker, document_picker, or images
+          if (data?.photo_picker || data?.document_picker || data?.images) {
             const mediaResults = await processFlowMedia(data);
             console.log('Media processing results:', JSON.stringify(mediaResults, null, 2));
           }
