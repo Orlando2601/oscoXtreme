@@ -2,6 +2,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
 
 // Create an Express app
 const app = express();
@@ -80,6 +82,100 @@ function encryptResponse(response, aesKeyBuffer, initialVectorBuffer) {
   ]).toString('base64');
 }
 
+// Media storage directory
+const MEDIA_DIR = path.join(__dirname, 'media_downloads');
+if (!fs.existsSync(MEDIA_DIR)) {
+  fs.mkdirSync(MEDIA_DIR, { recursive: true });
+}
+
+// Download media file from WhatsApp CDN
+async function downloadMediaFromCDN(cdnUrl) {
+  const response = await axios.get(cdnUrl, { responseType: 'arraybuffer' });
+  return Buffer.from(response.data);
+}
+
+// Decrypt and validate WhatsApp Flow media
+// cdn_file = ciphertext + hmac10 (last 10 bytes are first 10 bytes of HMAC-SHA256)
+// Uses AES256-CBC + HMAC-SHA256 + PKCS7 padding
+async function decryptAndValidateMedia(mediaItem) {
+  const { media_id, cdn_url, file_name, encryption_metadata } = mediaItem;
+  const { encrypted_hash, iv, encryption_key, hmac_key, plaintext_hash } = encryption_metadata;
+
+  console.log(`Processing media: ${file_name} (${media_id})`);
+
+  // Step 1: Download cdn_file from cdn_url
+  const cdnFile = await downloadMediaFromCDN(cdn_url);
+  console.log(`Downloaded ${cdnFile.length} bytes from CDN`);
+
+  // Step 2: Validate SHA256(cdn_file) == encrypted_hash
+  const cdnFileHash = crypto.createHash('sha256').update(cdnFile).digest('base64');
+  if (cdnFileHash !== encrypted_hash) {
+    throw new Error(`Encrypted hash mismatch for ${file_name}: expected ${encrypted_hash}, got ${cdnFileHash}`);
+  }
+  console.log(`Encrypted hash validated for ${file_name}`);
+
+  // Step 3: Split cdn_file into ciphertext and hmac10
+  const ciphertext = cdnFile.subarray(0, -10);
+  const hmac10 = cdnFile.subarray(-10);
+
+  // Step 4: Validate HMAC-SHA256
+  const ivBuffer = Buffer.from(iv, 'base64');
+  const hmacKeyBuffer = Buffer.from(hmac_key, 'base64');
+  const hmac = crypto.createHmac('sha256', hmacKeyBuffer);
+  hmac.update(ivBuffer);
+  hmac.update(ciphertext);
+  const computedHmac = hmac.digest();
+  const computedHmac10 = computedHmac.subarray(0, 10);
+
+  if (!crypto.timingSafeEqual(hmac10, computedHmac10)) {
+    throw new Error(`HMAC validation failed for ${file_name}`);
+  }
+  console.log(`HMAC validated for ${file_name}`);
+
+  // Step 5: Decrypt media with AES-256-CBC
+  const encKeyBuffer = Buffer.from(encryption_key, 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-cbc', encKeyBuffer, ivBuffer);
+  decipher.setAutoPadding(true); // PKCS7 padding removal
+  const decryptedMedia = Buffer.concat([
+    decipher.update(ciphertext),
+    decipher.final(),
+  ]);
+  console.log(`Decrypted ${decryptedMedia.length} bytes for ${file_name}`);
+
+  // Step 6: Validate SHA256(decrypted_media) == plaintext_hash
+  const decryptedHash = crypto.createHash('sha256').update(decryptedMedia).digest('base64');
+  if (decryptedHash !== plaintext_hash) {
+    throw new Error(`Plaintext hash mismatch for ${file_name}: expected ${plaintext_hash}, got ${decryptedHash}`);
+  }
+  console.log(`Plaintext hash validated for ${file_name}`);
+
+  // Save decrypted media to disk
+  const outputPath = path.join(MEDIA_DIR, `${media_id}_${file_name}`);
+  fs.writeFileSync(outputPath, decryptedMedia);
+  console.log(`Media saved to ${outputPath}`);
+
+  return { media_id, file_name, outputPath, size: decryptedMedia.length };
+}
+
+// Process all media items from photo_picker or document_picker
+async function processFlowMedia(data) {
+  const mediaItems = data.photo_picker || data.document_picker || [];
+  if (mediaItems.length === 0) return [];
+
+  console.log(`Processing ${mediaItems.length} media item(s)`);
+  const results = [];
+  for (const item of mediaItems) {
+    try {
+      const result = await decryptAndValidateMedia(item);
+      results.push(result);
+    } catch (err) {
+      console.error(`Failed to process media ${item.file_name}:`, err.message);
+      results.push({ media_id: item.media_id, file_name: item.file_name, error: err.message });
+    }
+  }
+  return results;
+}
+
 // Route for GET requests
 app.get('/', (req, res) => {
   const { 'hub.mode': mode, 'hub.challenge': challenge, 'hub.verify_token': token } = req.query;
@@ -93,7 +189,7 @@ app.get('/', (req, res) => {
 });
 
 // Route for POST requests
-app.post('/', (req, res) => {
+app.post('/', async (req, res) => {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
   console.log(`\n\nWebhook received ${timestamp}\n`);
   console.log(JSON.stringify(req.body, null, 2));
@@ -167,6 +263,12 @@ app.post('/', (req, res) => {
               console.log(`Image ${index}:`, JSON.stringify(image, null, 2));
             });
           }
+
+          // Process media from photo_picker or document_picker
+          if (data?.photo_picker || data?.document_picker) {
+            const mediaResults = await processFlowMedia(data);
+            console.log('Media processing results:', JSON.stringify(mediaResults, null, 2));
+          }
           
           responseData = {
             version: decryptedBody.version,
@@ -204,6 +306,31 @@ app.post('/', (req, res) => {
       }
       return;
     }
+  }
+
+  // Handle Cloud API nfm_reply with media (photo_picker / document_picker)
+  try {
+    const messages = req.body?.entry?.[0]?.changes?.[0]?.value?.messages;
+    if (messages) {
+      for (const message of messages) {
+        const nfmReply = message?.interactive?.nfm_reply;
+        if (nfmReply?.response_json) {
+          const responseJson = typeof nfmReply.response_json === 'string'
+            ? JSON.parse(nfmReply.response_json)
+            : nfmReply.response_json;
+
+          const mediaItems = responseJson.photo_picker || responseJson.document_picker || [];
+          if (mediaItems.length > 0) {
+            console.log(`Cloud API nfm_reply contains ${mediaItems.length} media item(s)`);
+            for (const item of mediaItems) {
+              console.log(`Media: ${item.file_name} (id: ${item.id}, mime: ${item.mime_type}, sha256: ${item.sha256})`);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error processing nfm_reply media:', err.message);
   }
 
   // Default response for regular webhook events
