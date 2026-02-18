@@ -4,20 +4,23 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const bodyParser = require('body-parser');
 
 // Create an Express app
 const app = express();
 
 // Middleware to parse JSON bodies
 app.use(express.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // Set port and verify_token
 const port = process.env.PORT || 3000;
 const verifyToken = process.env.VERIFY_TOKEN;
 
-// Load private key for decryption
-const privateKey = fs.readFileSync('/etc/secrets/private_key.pem', 'utf8');
-console.log('Private key loaded successfully');
+// Load private key for decryption (commented out for mock API)
+// const privateKey = fs.readFileSync('/etc/secrets/private_key.pem', 'utf8');
+// console.log('Private key loaded successfully');
+const privateKey = 'mock-private-key'; // Mock key for testing
 
 const TAG_LENGTH = 16;
 
@@ -348,7 +351,340 @@ app.post('/', async (req, res) => {
   res.status(200).end();
 });
 
+// ================ MATIAS API MOCK ENDPOINTS ================
+
+// Store generated tokens and invoices
+const tokens = {};
+const invoices = {};
+
+// Authentication endpoint
+app.post('/api/ubl2.1/auth/login', (req, res) => {
+  console.log('Authentication request received:', req.body);
+  
+  const { email, password } = req.body;
+  
+  // Simple validation
+  if (!email || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email and password are required'
+    });
+  }
+  
+  // Generate mock token
+  const token = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6IjM' + 
+                crypto.randomBytes(64).toString('hex');
+  
+  // Store token with expiration
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + 30); // 30 days from now
+  
+  tokens[token] = {
+    email,
+    expiresAt: expiresAt.toISOString().replace('T', ' ').slice(0, 19)
+  };
+  
+  console.log('Generated token:', token.substring(0, 20) + '...');
+  
+  // Return success response
+  res.json({
+    access_token: token,
+    user: {
+      id: 1,
+      email: email,
+      name: 'TU EMPRESA S.A.S.'
+    },
+    expires_at: expiresAt.toISOString().replace('T', ' ').slice(0, 19),
+    message: 'Bienvenido a Matias. Su sesión ha sido iniciada con éxito.',
+    success: true
+  });
+});
+
+// Personal Access Token endpoint
+app.post('/api/ubl2.1/v3/auth/tokens', (req, res) => {
+  console.log('PAT request received');
+  
+  // Check authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: No token provided'
+    });
+  }
+  
+  const token = authHeader.split(' ')[1];
+  if (!tokens[token]) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: Invalid token'
+    });
+  }
+  
+  const { name, expires_in_days } = req.body;
+  
+  if (!name) {
+    return res.status(400).json({
+      success: false,
+      message: 'Name is required for Personal Access Token'
+    });
+  }
+  
+  // Generate new PAT
+  const pat = 'pat_' + crypto.randomBytes(32).toString('hex');
+  
+  // Store PAT with expiration
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + (expires_in_days || 30));
+  
+  tokens[pat] = {
+    name,
+    expiresAt: expiresAt.toISOString().replace('T', ' ').slice(0, 19),
+    type: 'personal'
+  };
+  
+  console.log('Generated PAT:', pat.substring(0, 20) + '...');
+  
+  // Return success response
+  res.json({
+    token: pat,
+    name,
+    expires_at: expiresAt.toISOString().replace('T', ' ').slice(0, 19),
+    success: true
+  });
+});
+
+// Invoice creation endpoint
+app.post('/api/invoices', (req, res) => {
+  console.log('Invoice creation request received');
+  
+  // Check authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: No token provided'
+    });
+  }
+  
+  const token = authHeader.split(' ')[1];
+  if (!tokens[token]) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: Invalid token'
+    });
+  }
+  
+  const invoiceData = req.body;
+  console.log('Invoice data:', JSON.stringify(invoiceData, null, 2));
+  
+  // Basic validation
+  if (!invoiceData.prefix || !invoiceData.document_number) {
+    return res.status(400).json({
+      success: false,
+      message: 'Prefix and document_number are required'
+    });
+  }
+  
+  const invoiceId = `${invoiceData.prefix}-${invoiceData.document_number}`;
+  
+  // Check for duplicate
+  if (invoices[invoiceId]) {
+    return res.status(400).json({
+      success: false,
+      message: `El documento (Factura electrónica) con numero ${invoiceData.prefix}${invoiceData.document_number}, ya se encuentra validado`
+    });
+  }
+  
+  // Generate CUFE (Código Único de Facturación Electrónica)
+  const cufe = 'd45f3b2ed042ce0e075891591c3b3a7ae3a9c176ca191dab1bd23e5cdd3b48b8c548a088dfcbe20ee7baa2bed2dccd48';
+  
+  // Store invoice
+  invoices[invoiceId] = {
+    ...invoiceData,
+    cufe,
+    created_at: new Date().toISOString(),
+    status: 'processed'
+  };
+  
+  console.log(`Invoice ${invoiceId} created successfully`);
+  
+  // Return success response
+  res.json({
+    message: 'El documento ha sido procesado por la DIAN.',
+    send_to_queue: 0,
+    XmlDocumentKey: cufe,
+    response: {
+      ErrorMessage: {
+        string: []
+      },
+      IsValid: 'true',
+      StatusCode: '00',
+      StatusDescription: 'Procesado Correctamente.',
+      StatusMessage: `La Factura electrónica ${invoiceData.prefix}${invoiceData.document_number}, ha sido autorizada.`,
+      XmlBase64Bytes: '',
+      XmlBytes: {
+        _attributes: {
+          nil: 'true'
+        }
+      },
+      XmlDocumentKey: cufe,
+      XmlFileName: `fv09010914030002500000095`
+    },
+    XmlBase64Bytes: '',
+    AttachedDocument: {
+      pathZip: '1/ad/z09010914030002500000042.zip',
+      path: '1/ad/ad09010914030002500000041.xml',
+      url: 'https://api-v2.matias-api.com/attachments/1/ad/ad09010914030002500000041.xml',
+      data: ''
+    },
+    qr: {
+      qrDian: '',
+      url: '',
+      path: '1/fv09010914030002500000095.png',
+      data: ''
+    },
+    pdf: {
+      path: '1/fv09010914030002500000095.pdf',
+      url: `https://api-v2.matias-api.com/pdf/1/fv09010914030002500000095.pdf`,
+      data: ''
+    },
+    success: true
+  });
+});
+
+// Invoice query endpoint
+app.get('/api/invoices/:invoiceId', (req, res) => {
+  const invoiceId = req.params.invoiceId;
+  console.log(`Query for invoice ${invoiceId}`);
+  
+  // Check authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: No token provided'
+    });
+  }
+  
+  const token = authHeader.split(' ')[1];
+  if (!tokens[token]) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: Invalid token'
+    });
+  }
+  
+  // Check if invoice exists
+  if (!invoices[invoiceId]) {
+    return res.status(404).json({
+      success: false,
+      message: `Invoice ${invoiceId} not found`
+    });
+  }
+  
+  const invoice = invoices[invoiceId];
+  const cufe = invoice.cufe;
+  
+  // Return invoice details
+  res.json({
+    message: 'El documento ha sido procesado por la DIAN.',
+    send_to_queue: 0,
+    XmlDocumentKey: cufe,
+    response: {
+      ErrorMessage: {
+        string: []
+      },
+      IsValid: 'true',
+      StatusCode: '00',
+      StatusDescription: 'Procesado Correctamente.',
+      StatusMessage: `La Factura electrónica ${invoice.prefix}${invoice.document_number}, ha sido autorizada.`,
+      XmlBase64Bytes: '',
+      XmlBytes: {
+        _attributes: {
+          nil: 'true'
+        }
+      },
+      XmlDocumentKey: cufe,
+      XmlFileName: `fv09010914030002500000095`
+    },
+    XmlBase64Bytes: '',
+    AttachedDocument: {
+      pathZip: '1/ad/z09010914030002500000042.zip',
+      path: '1/ad/ad09010914030002500000041.xml',
+      url: 'https://api-v2.matias-api.com/attachments/1/ad/ad09010914030002500000041.xml',
+      data: ''
+    },
+    qr: {
+      qrDian: '',
+      url: '',
+      path: '1/fv09010914030002500000095.png',
+      data: ''
+    },
+    pdf: {
+      path: '1/fv09010914030002500000095.pdf',
+      url: `https://api-v2.matias-api.com/pdf/1/fv09010914030002500000095.pdf`,
+      data: ''
+    },
+    success: true
+  });
+});
+
+// Email sending endpoint
+app.post('/api/invoices/:invoiceId/send-email', (req, res) => {
+  const invoiceId = req.params.invoiceId;
+  console.log(`Send email request for invoice ${invoiceId}`);
+  
+  // Check authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: No token provided'
+    });
+  }
+  
+  const token = authHeader.split(' ')[1];
+  if (!tokens[token]) {
+    return res.status(401).json({
+      success: false,
+      message: 'Unauthorized: Invalid token'
+    });
+  }
+  
+  // Check if invoice exists
+  if (!invoices[invoiceId]) {
+    return res.status(404).json({
+      success: false,
+      message: `Invoice ${invoiceId} not found`
+    });
+  }
+  
+  const { email } = req.body;
+  
+  if (!email) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email is required'
+    });
+  }
+  
+  console.log(`Email would be sent to ${email} for invoice ${invoiceId}`);
+  
+  // Return success response
+  res.json({
+    success: true,
+    message: `Email sent successfully to ${email}`
+  });
+});
+
 // Start the server
 app.listen(port, () => {
   console.log(`\nListening on port ${port}\n`);
+  console.log('Matias API mock endpoints available:');
+  console.log('- POST /api/ubl2.1/auth/login (Authentication)');
+  console.log('- POST /api/ubl2.1/v3/auth/tokens (Personal Access Tokens)');
+  console.log('- POST /api/invoices (Create invoice)');
+  console.log('- GET /api/invoices/:invoiceId (Query invoice)');
+  console.log('- POST /api/invoices/:invoiceId/send-email (Send email)');
 });
